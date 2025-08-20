@@ -32,7 +32,9 @@ Just `make` it.
 ## Usage
 
 Run the program on a directory of images:
-````./dhash_calc_cuda <directory> [options]
+```
+./dhash_calc_cuda <directory> [options]
+````
 
 **Options**
 * `--cpu`
