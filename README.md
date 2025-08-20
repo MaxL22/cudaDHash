@@ -19,7 +19,7 @@ This tool scans a directory of images, computes their difference-hash fingerprin
 - **CUDA-capable GPU** (Compute Capability ≥ 3.0 recommended)
 - **CUDA Toolkit** installed
 - **C compiler** (`gcc`/`g++`)
-- [stb_image](https://github.com/nothings/stb) (already included as a header)
+- [stb_image.h](https://github.com/nothings/stb) for image loading (the Makefile takes care of it)
 
 ---
 
