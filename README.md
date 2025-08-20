@@ -34,17 +34,19 @@ Just `make` it.
 Run the program on a directory of images:
 ```
 ./dhash_calc_cuda <directory> [options]
-````
+```
 
 **Options**
 * `--cpu`
 Use CPU for image comparison (default is GPU).
 
-* `--threshold <N>`
+* `<N>`
 Set maximum Hamming distance (N) for considering two images as similar. Default 10.
 
 **Example**
-    ./dhash_calc_cuda ./images 10 --cpu
+```
+./dhash_calc_cuda ./images 10 --cpu
+```
 
 ---
 
@@ -53,6 +55,6 @@ Set maximum Hamming distance (N) for considering two images as similar. Default 
 1. Each image is resized to 9×8 grayscale.
 2. The dHash algorithm compares adjacent pixels horizontally to produce a 64-bit fingerprint.
 3. Hashes are compared using Hamming distance:
-  * Distance = number of differing bits.
-  * Smaller distance = more similar images.
+    * Distance = number of differing bits.
+    * Smaller distance = more similar images.
 4. Results are printed, showing pairs of similar images.
