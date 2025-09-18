@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -449,10 +450,25 @@ int process_directory(const char *directory, ImageHash *results, bool gpu) {
   free(entries);
   closedir(dir);
 
+  // This is the main part implemented on the GPU
+  clock_t start, end;
+  double passed;
+
+  start = clock();
+
   if (gpu)
-    return process_dir_gpu(count, h_batch_data, filenames, results);
+    count = process_dir_gpu(count, h_batch_data, filenames, results);
   else
-    return process_dir_cpu(count, h_batch_data, filenames, results);
+    count = process_dir_cpu(count, h_batch_data, filenames, results);
+
+  end = clock();
+  passed = ((double)(end - start)) * 1000.0 / CLOCKS_PER_SEC;
+
+  printf("\n========================= \n");
+  printf("Time taken: %.3f ms\n", passed);
+  printf("========================= \n \n");
+
+  return count;
 }
 
 /**
