@@ -1,4 +1,4 @@
-#include "utils.h"
+#include "dhash_calculator.h"
 #include <ctype.h>
 #include <cuda_runtime.h>
 #include <dirent.h>
@@ -10,25 +10,6 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-
-#define MAX_FILES 4096
-#define MAX_FILENAME 256
-#define DHASH_WIDTH 9
-#define DHASH_HEIGHT 8
-#define THREADS_PER_BLOCK 256
-
-// Image hash struct
-typedef struct {
-  char filename[MAX_FILENAME];
-  uint64_t hash;
-} ImageHash;
-
-// Structure to store comparison results
-typedef struct {
-  int img1_idx;
-  int img2_idx;
-  int distance;
-} ComparisonResult;
 
 /**
  * compute_dHash_kernel(): CUDA kernel to compute dHash for multiple images
@@ -218,8 +199,8 @@ int process_image(const char *filepath, const char *filename,
  * Returns the distance between the two hashes
  */
 __device__ int hamming_distance_device(uint64_t hash1, uint64_t hash2) {
-  uint64_t xor_result = hash1 ^ hash2;
-  return __popcll(xor_result); // CUDA built-in
+  // Cuda built-in
+  return __popcll(hash1 ^ hash2);
 }
 
 /**
@@ -383,7 +364,6 @@ __global__ void compare_hashes_kernel_shared(uint64_t *hashes,
   }
 }
 
-//
 /**
  * process_directory_cuda(): Process all images in directory using CUDA
  * @directory: directory
@@ -392,7 +372,7 @@ __global__ void compare_hashes_kernel_shared(uint64_t *hashes,
  * Returns: the count of images processed, otherwise -1 if can't open directory,
  * -2 if can't scan directory, -3/-4 if host memory error, -5 to -10 CUDA errors
  */
-int process_directory_cuda(const char *directory, ImageHash *results) {
+int process_directory(const char *directory, ImageHash *results, bool gpu) {
   DIR *dir = opendir(directory);
   if (!dir) {
     printf("Cannot open directory: %s\n", directory);
@@ -469,13 +449,87 @@ int process_directory_cuda(const char *directory, ImageHash *results) {
   free(entries);
   closedir(dir);
 
-  printf("Loaded %d images, processing with CUDA...\n", count);
+  if (gpu)
+    return process_dir_gpu(count, h_batch_data, filenames, results);
+  else
+    return process_dir_cpu(count, h_batch_data, filenames, results);
+}
 
+/**
+ * compute_dHash_cpu(): CPU version of dHash computation
+ * @image_data: pointer to 9x8 grayscale image data
+ *
+ * Returns: computed dHash value
+ */
+uint64_t compute_dHash_cpu(unsigned char *image_data) {
+  uint64_t hash = 0;
+
+  for (int row = 0; row < DHASH_HEIGHT; row++) {
+    for (int col = 0; col < DHASH_WIDTH - 1; col++) {
+      int pixelIdx = row * DHASH_WIDTH + col;
+      // Compare adjacent horizontal pixels
+      if (image_data[pixelIdx] > image_data[pixelIdx + 1]) {
+        int bitPos = row * (DHASH_WIDTH - 1) + col;
+        // Write the bit if left brighter than right
+        hash |= (1ULL << bitPos);
+      }
+    }
+  }
+
+  return hash;
+}
+
+/**
+ * process_dir_cpu(): CPU version for directory processing
+ * @count: number of images
+ * @h_batch_data: grayscale images
+ * @filenames: array of filenames
+ * @results: output array for hash results
+ *
+ * Returns: number of images processed
+ */
+int process_dir_cpu(int count, unsigned char *h_batch_data,
+                    char filenames[][MAX_FILENAME], ImageHash *results) {
+  printf("Processing %d images on CPU...\n", count);
+
+  // Process each image sequentially
+  for (int i = 0; i < count; i++) {
+    // Get pointer to current image data
+    unsigned char *image_ptr = h_batch_data + i * DHASH_WIDTH * DHASH_HEIGHT;
+
+    // Compute dHash for this image
+    uint64_t hash = compute_dHash_cpu(image_ptr);
+
+    // Store results
+    strncpy(results[i].filename, filenames[i], MAX_FILENAME - 1);
+    results[i].filename[MAX_FILENAME - 1] = '\0';
+    results[i].hash = hash;
+  }
+
+  // Cleanup allocated memory (same as GPU version)
+  free(h_batch_data);
+  free(filenames);
+
+  printf("CPU processing completed successfully!\n\n");
+  return count;
+}
+
+/**
+ * process_dir_gpu(): GPU version for directory processing
+ * @count: number of images
+ * @h_batch_data: grayscale images
+ * @filenames: array of filenames
+ * @results: output array for hash results
+ *
+ * Returns: number of images processed
+ */
+int process_dir_gpu(int count, unsigned char *h_batch_data,
+                    char filenames[][MAX_FILENAME], ImageHash *results) {
   // Allocate GPU memory
   unsigned char *d_batch_data;
   uint64_t *d_hashes;
-  uint64_t *h_hashes = (uint64_t *)malloc(count * sizeof(uint64_t));
 
+  uint64_t *h_hashes = (uint64_t *)malloc(count * sizeof(uint64_t));
   if (!h_hashes) {
     printf("Failed to allocate host hash array\n");
     free(h_batch_data);
@@ -800,11 +854,23 @@ int find_similar_images_cpu(ImageHash *hashes, int count, int threshold) {
   return 0;
 }
 
+int find_similar_images(ImageHash *hashes, int count, int threshold, bool gpu) {
+  if (gpu) {
+    int res = find_similar_images_gpu(hashes, count, threshold);
+    if (res == 0)
+      return res;
+    else
+      printf("Error while using GPU for comparisons, trying CPU. \n");
+  }
+
+  return find_similar_images_cpu(hashes, count, threshold);
+}
+
 int main(int argc, char *argv[]) {
   // Handle command line arguments including optional threshold parameter and
   // comparison mode
-  int threshold = 10;             // Default threshold
-  bool use_gpu_comparison = true; // Default to GPU comparison
+  int threshold = 10;  // Default threshold
+  bool use_gpu = true; // Default to GPU comparison
 
   if (argc < 2 || argc > 4) {
     printf("Usage: %s <image_directory> [threshold] [--cpu]\n", argv[0]);
@@ -815,8 +881,7 @@ int main(int argc, char *argv[]) {
     printf("  image_directory: Path to directory containing images\n");
     printf("  threshold:       Optional Hamming distance threshold (default: "
            "10)\n");
-    printf("  --cpu:           Optional flag to use CPU for hash comparison "
-           "instead of GPU\n\n");
+    printf("  --cpu:           Optional flag to use CPU instead of GPU\n\n");
     printf("Supported formats: JPG, JPEG, PNG, BMP\n");
     return 1;
   }
@@ -827,7 +892,7 @@ int main(int argc, char *argv[]) {
   // Parse optional arguments
   for (int i = 2; i < argc; i++) {
     if (strcmp(argv[i], "--cpu") == 0) {
-      use_gpu_comparison = false;
+      use_gpu = false;
     } else {
       threshold = atoi(argv[i]);
       if (threshold < 0 || threshold > 64) {
@@ -837,7 +902,7 @@ int main(int argc, char *argv[]) {
       }
     }
   }
-  printf("Comparison mode: %s\n", use_gpu_comparison ? "GPU" : "CPU");
+  printf("Mode: %s\n", use_gpu ? "GPU" : "CPU");
 
   // Check if directory exists
   struct stat st;
@@ -863,37 +928,30 @@ int main(int argc, char *argv[]) {
   printf("Compute capability: %d.%d\n", prop.major, prop.minor);
   printf("Max threads per block: %d\n\n", prop.maxThreadsPerBlock);
 
-  // Process all images in directory using CUDA
-  // Allocate memory for hash results - use a reasonable estimate first
+  // Process all images in directory
+  // Allocate memory for hash results, use a reasonable estimate first
   ImageHash *hashes = (ImageHash *)malloc(MAX_FILES * sizeof(ImageHash));
   if (!hashes) {
     printf("Memory allocation failed!\n");
     return 4;
   }
 
-  int actual_image_count = process_directory_cuda(directory, hashes);
+  int actual_image_count = process_directory(directory, hashes, use_gpu);
 
-  if (actual_image_count > 0) {
-    print_results(hashes, actual_image_count);
-
-    // Choose comparison method based on user preference
-    if (use_gpu_comparison) {
-      int gpu_result =
-          find_similar_images_gpu(hashes, actual_image_count, threshold);
-      if (gpu_result != 0) {
-        printf("GPU comparison failed, falling back to CPU...\n");
-        find_similar_images_cpu(hashes, actual_image_count, threshold);
-      }
-    } else {
-      find_similar_images_cpu(hashes, actual_image_count, threshold);
-    }
-  } else if (actual_image_count == 0) {
+  if (actual_image_count == 0) {
     printf("No images found or processed.\n");
-  } else {
-    // Handle error cases (negative return values)
+  } else if (actual_image_count < 0) {
     printf("Error processing directory (code: %d)\n", actual_image_count);
     free(hashes);
     return 5;
+  }
+
+  // Print results
+  print_results(hashes, actual_image_count);
+  int res = find_similar_images(hashes, actual_image_count, threshold, use_gpu);
+  if (res != 0) {
+    printf("Error during hash comparison (code: %d) \n", res);
+    return 6;
   }
 
   free(hashes);

@@ -102,20 +102,6 @@ debug: show-compute $(TARGET)
 profile: CUDA_FLAGS += -lineinfo
 profile: show-compute $(TARGET)
 
-# Build for maximum compatibility (multiple architectures)
-universal:
-	@echo "Building universal binary for multiple GPU architectures..."
-	$(NVCC) $(BASE_FLAGS) \
-		-gencode arch=compute_50,code=sm_50 \
-		-gencode arch=compute_60,code=sm_60 \
-		-gencode arch=compute_70,code=sm_70 \
-		-gencode arch=compute_75,code=sm_75 \
-		-gencode arch=compute_80,code=sm_80 \
-		-gencode arch=compute_86,code=sm_86 \
-		-gencode arch=compute_89,code=sm_89 \
-		-gencode arch=compute_90,code=sm_90 \
-		-o $(TARGET) $(SOURCE) $(LIBS)
-
 # Detailed GPU info
 gpu-info:
 	@echo "=== Detailed GPU Information ==="
@@ -139,7 +125,6 @@ help:
 	@echo "  show-compute- Show detected compute capability"
 	@echo "  set-compute - Show manual compute capability override options"
 	@echo "  redetect    - Force redetection of GPU compute capability"
-	@echo "  universal   - Build for multiple GPU architectures (broader compatibility)"
 	@echo "  clean       - Remove build artifacts"
 	@echo "  clean-all   - Remove build artifacts and downloaded files"
 	@echo "  debug       - Build with debug information"
@@ -156,4 +141,4 @@ help:
 	@echo "  - NVIDIA GPU with compute capability 2.0+"
 	@echo "  - NVIDIA drivers"
 
-.PHONY: all show-compute set-compute redetect universal clean clean-all debug profile gpu-info cuda-check help
+.PHONY: all show-compute set-compute redetect clean clean-all debug profile gpu-info cuda-check help
