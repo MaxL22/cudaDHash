@@ -10,7 +10,7 @@
 #define MAX_FILENAME 256
 #define DHASH_WIDTH 9
 #define DHASH_HEIGHT 8
-#define THREADS_PER_BLOCK 256
+#define THREADS_PER_BLOCK 128
 
 #define MAX_PATH_LENGTH 1024
 #define SHARED_MEMORY_THRESHOLD 1024
@@ -42,8 +42,6 @@ __global__ void compare_hashes_kernel_shared(uint64_t *hashes,
                                              ComparisonResult *results,
                                              int *result_count, int numImages,
                                              int threshold);
-
-__device__ int hamming_distance_device(uint64_t hash1, uint64_t hash2);
 #endif
 
 // Host functions

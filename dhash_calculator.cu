@@ -1,4 +1,5 @@
 #include "dhash_calculator.h"
+#include <bits/types/struct_timeval.h>
 #include <ctype.h>
 #include <cuda_runtime.h>
 #include <dirent.h>
@@ -7,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <time.h>
+#include <sys/time.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -30,7 +31,6 @@ __global__ void compute_dHash_kernel(unsigned char *images, uint64_t *hashes,
   extern __shared__ unsigned char shared_img[];
   unsigned char *local_img =
       &shared_img[threadIdx.x * DHASH_WIDTH * DHASH_HEIGHT];
-
   // Load image pointed by global data in shared memory
   unsigned char *global_img = images + idx * DHASH_WIDTH * DHASH_HEIGHT;
   for (int i = 0; i < DHASH_WIDTH * DHASH_HEIGHT; i++) {
@@ -53,6 +53,7 @@ __global__ void compute_dHash_kernel(unsigned char *images, uint64_t *hashes,
       }
     }
   }
+  // Write to memory
   hashes[idx] = hash;
 }
 
@@ -103,12 +104,12 @@ void resize_to_dHash(unsigned char *input, int width, int height, int channels,
       cx[1] = cx[0] + 1 < width ? cx[0] + 1 : cx[0];
       cy[1] = cy[0] + 1 < height ? cy[0] + 1 : cy[0];
 
-      // Get pixel values
+      // Get pixel values, idx contains the RGB values
       int idx[4];
       for (int i = 0; i < 4; i++) {
         idx[i] = (cy[i >> 1] * width + cx[i & 0x1]) * channels;
       }
-
+      // grayscale of the earlier RGB
       unsigned char gray[4];
 
       // Convert to gray
@@ -151,6 +152,7 @@ int count_images(struct dirent **entries, int n_entries) {
       count++;
     }
   }
+
   return count;
 }
 
@@ -162,7 +164,7 @@ int count_images(struct dirent **entries, int n_entries) {
  * @batch_index: index of the current img
  * @filenames_ array of filenames
  *
- * Returns 0 if failed, 1 if successful
+ * Returns: 0 if failed, 1 if successful
  */
 int process_image(const char *filepath, const char *filename,
                   unsigned char *batch_data, int batch_index,
@@ -192,19 +194,6 @@ int process_image(const char *filepath, const char *filename,
 }
 
 /**
- * hamming_distance_device(): CUDA device function to calculate Hamming distance
- * between two hashes
- * @hash1: first hash
- * @hash2: second hash
- *
- * Returns the distance between the two hashes
- */
-__device__ int hamming_distance_device(uint64_t hash1, uint64_t hash2) {
-  // Cuda built-in
-  return __popcll(hash1 ^ hash2);
-}
-
-/**
  * hamming_distance(): Host function to calculate Hamming distance between two
  * hashes
  * @hash1: first hash
@@ -219,6 +208,7 @@ int hamming_distance(uint64_t hash1, uint64_t hash2) {
     count += xor_result & 1;
     xor_result >>= 1;
   }
+
   return count;
 }
 
@@ -234,11 +224,11 @@ __global__ void compare_hashes_kernel(uint64_t *hashes,
                                       ComparisonResult *results,
                                       int *result_count, int numImages,
                                       int threshold) {
-  // Idk why it's a long long, don't remember
-  long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  // int should be sufficient, long to be REALLY sure
+  long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
 
   // Calculate total number of unique pairs: n*(n-1)/2
-  long long total_pairs = ((long long)numImages * (numImages - 1)) / 2;
+  long total_pairs = ((long)numImages * (numImages - 1)) / 2;
   if (idx >= total_pairs)
     return;
 
@@ -251,7 +241,7 @@ __global__ void compare_hashes_kernel(uint64_t *hashes,
    * bother calculating it again, you don't remember
    */
   int i = (int)((-1.0 + sqrt(1.0 + 8.0 * idx_d)) / 2.0);
-  long long temp = ((long long)i * (i + 1)) / 2;
+  long temp = ((long)i * (i + 1)) / 2;
   int j = (int)(idx - temp + i + 1);
 
   // Ensure we don't go out of bounds
@@ -259,7 +249,7 @@ __global__ void compare_hashes_kernel(uint64_t *hashes,
     return;
 
   // Calculate Hamming distance
-  int distance = hamming_distance_device(hashes[i], hashes[j]);
+  int distance = __popcll(hashes[i] ^ hashes[j]);
 
   // If distance is within threshold, add to results
   if (distance <= threshold) {
@@ -300,30 +290,32 @@ __global__ void compare_hashes_kernel_shared(uint64_t *hashes,
   __syncthreads();
 
   // Calculate which pairs this thread will handle
-  long long total_pairs = ((long long)numImages * (numImages - 1)) / 2;
-  long long pairs_per_block = (total_pairs + gridDim.x - 1) / gridDim.x;
+  long total_pairs = ((long)numImages * (numImages - 1)) / 2;
+  long pairs_per_block = (total_pairs + gridDim.x - 1) / gridDim.x;
+
   // Indexes of start and end pair inside the block
-  long long start_pair = (long long)bid * pairs_per_block;
-  long long end_pair = min(start_pair + pairs_per_block, total_pairs);
+  long start_pair = (long)bid * pairs_per_block;
+  bool longer = (start_pair + pairs_per_block < total_pairs) ? true : false;
+  long end_pair =
+      (start_pair + pairs_per_block) * longer + total_pairs * (1 - longer);
 
   // Process the pairs assigned to the thread, should be even across threads
-  for (long long pair_idx = start_pair + tid; pair_idx < end_pair;
+  for (long pair_idx = start_pair + tid; pair_idx < end_pair;
        pair_idx += block_size) {
     // Convert linear index to (i,j) pair with bounds checking
     double pair_d = (double)pair_idx;
     int i = (int)((-1.0 + sqrt(1.0 + 8.0 * pair_d)) / 2.0);
-    int j = (int)(pair_idx - (((long long)i * (i + 1)) / 2.0) + i + 1);
+    int j = (int)(pair_idx - (((long)i * (i + 1)) / 2.0) + i + 1);
     // Bounds check
     if (i >= numImages || j >= numImages || i < 0 || j < 0)
       continue;
 
     // Calculate Hamming distance using shared memory
-    int distance = hamming_distance_device(shared_hashes[i], shared_hashes[j]);
+    int distance = __popcll(shared_hashes[i] ^ shared_hashes[j]);
 
     // If distance is within threshold, add to results
 
-    // Check condition and create bitmask for the threads which satisfy the
-    // condition
+    // Create bitmask for the threads that satisfy the distance condition
     unsigned mask = __ballot_sync(0xFFFFFFFF, distance <= threshold);
     // Only continue if at least one thread qualifies
     if (mask == 0)
@@ -337,7 +329,6 @@ __global__ void compare_hashes_kernel_shared(uint64_t *hashes,
       continue;
 
     // Count qualifying threads before this one in the warp
-    // (__popc() counts the number of bits set to 1)
     int warp_offset = __popc(mask & ((1U << lane_id) - 1));
 
     // First qualifying thread does atomic add for entire warp
@@ -346,12 +337,13 @@ __global__ void compare_hashes_kernel_shared(uint64_t *hashes,
     // __ffs() gets the position of the first set bit (1-indexed)
     if (lane_id == __ffs(mask) - 1) {
       int warp_count = __popc(mask);
+      // atomicAdd() returns the value before the add
       base_idx = atomicAdd(result_count, warp_count);
     }
 
     // Broadcast base index to all qualifying threads
-    // __shfl_sync() copies value base_idx from lane __ffs(mask) - 1 to all bits
-    // in mask
+    // __shfl_sync() copies value base_idx from lane __ffs(mask) - 1 to all
+    // threads in the warp, according to the mask
     base_idx = __shfl_sync(mask, base_idx, __ffs(mask) - 1);
     // Position in which to write the result
     int result_idx = base_idx + warp_offset;
@@ -374,6 +366,12 @@ __global__ void compare_hashes_kernel_shared(uint64_t *hashes,
  * -2 if can't scan directory, -3/-4 if host memory error, -5 to -10 CUDA errors
  */
 int process_directory(const char *directory, ImageHash *results, bool gpu) {
+
+  struct timeval start, mid, end;
+  double passed, kernel;
+
+  gettimeofday(&start, NULL);
+
   DIR *dir = opendir(directory);
   if (!dir) {
     printf("Cannot open directory: %s\n", directory);
@@ -451,22 +449,28 @@ int process_directory(const char *directory, ImageHash *results, bool gpu) {
   closedir(dir);
 
   // This is the main part implemented on the GPU
-  clock_t start, end;
-  double passed;
 
-  start = clock();
+  gettimeofday(&mid, NULL);
 
   if (gpu)
     count = process_dir_gpu(count, h_batch_data, filenames, results);
   else
     count = process_dir_cpu(count, h_batch_data, filenames, results);
 
-  end = clock();
-  passed = ((double)(end - start)) * 1000.0 / CLOCKS_PER_SEC;
+  gettimeofday(&end, NULL);
 
-  printf("\n========================= \n");
-  printf("Time taken: %.3f ms\n", passed);
-  printf("========================= \n \n");
+  passed = ((end.tv_sec - start.tv_sec) * 1000000.0 +
+            (end.tv_usec - start.tv_usec)) /
+           1000.0;
+  kernel =
+      ((end.tv_sec - mid.tv_sec) * 1000000.0 + (end.tv_usec - mid.tv_usec)) /
+      1000.0;
+
+  fprintf(stderr, "\n========================= \n");
+  fprintf(stderr, "Whole dir processing: %.3f ms\n", passed);
+  fprintf(stderr, "Just the %s: %.3f ms\n", gpu ? "kernel" : "cpu function",
+          kernel);
+  fprintf(stderr, "========================= \n \n");
 
   return count;
 }
@@ -522,7 +526,7 @@ int process_dir_cpu(int count, unsigned char *h_batch_data,
     results[i].hash = hash;
   }
 
-  // Cleanup allocated memory (same as GPU version)
+  // Cleanup allocated memory
   free(h_batch_data);
   free(filenames);
 
@@ -590,8 +594,9 @@ int process_dir_gpu(int count, unsigned char *h_batch_data,
   size_t shared_mem_size =
       THREADS_PER_BLOCK * DHASH_WIDTH * DHASH_HEIGHT * sizeof(unsigned char);
 
-  printf("Launching CUDA kernel with %d blocks, %d threads per block\n",
-         blocks_per_grid, THREADS_PER_BLOCK);
+  printf("Launching CUDA kernel with %d blocks, %d threads per block, shared "
+         "mem %zu\n",
+         blocks_per_grid, THREADS_PER_BLOCK, shared_mem_size);
 
   compute_dHash_kernel<<<blocks_per_grid, THREADS_PER_BLOCK, shared_mem_size>>>(
       d_batch_data, d_hashes, count);
@@ -679,14 +684,13 @@ int find_similar_images_gpu(ImageHash *hashes, int count, int threshold) {
   }
 
   // Calculate total number of unique pairs
-  long long total_pairs = ((long long)count * (count - 1)) / 2;
+  long total_pairs = ((long)count * (count - 1)) / 2;
   // Check if total_pairs fits in int for results array
   if (total_pairs > INT_MAX) {
-    printf("Too many image pairs (%lld) for current implementation\n",
+    printf("Too many image pairs (%ld) for current implementation\n",
            total_pairs);
     return 2;
-  }
-  // This is useful only for >2^16 images (i.e. not really useful)
+  } // This is useful only for >2^16 images (i.e., not really useful)
 
   int total_pairs_int = (int)total_pairs;
   // Allocate GPU memory
@@ -763,7 +767,7 @@ int find_similar_images_gpu(ImageHash *hashes, int count, int threshold) {
   // Should be below, but throws an variable initialization skip error
   cudaError_t err = cudaSuccess;
 
-  printf("Comparing %lld image pairs on GPU...\n", total_pairs);
+  printf("Comparing %ld image pairs on GPU...\n", total_pairs);
   // Choose kernel based on dataset size using named constants
   if (count <= SHARED_MEMORY_THRESHOLD) { // Should always be here
     int blocks = (total_pairs_int + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
@@ -777,10 +781,9 @@ int find_similar_images_gpu(ImageHash *hashes, int count, int threshold) {
                                    shared_mem_size>>>(
         d_hashes, d_results, d_result_count, count, threshold);
   } else { // You got a lot of images boy
-    long long blocks_ll =
-        (total_pairs + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    long blocks_ll = (total_pairs + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
     if (blocks_ll > INT_MAX) { // A LOOOOOOOT
-      printf("Too many blocks required (%lld) for kernel launch\n", blocks_ll);
+      printf("Too many blocks required (%ld) for kernel launch\n", blocks_ll);
       goto cleanup;
     }
     int blocks = (int)blocks_ll;
@@ -873,6 +876,7 @@ int find_similar_images_cpu(ImageHash *hashes, int count, int threshold) {
 int find_similar_images(ImageHash *hashes, int count, int threshold, bool gpu) {
   if (gpu) {
     int res = find_similar_images_gpu(hashes, count, threshold);
+
     if (res == 0)
       return res;
     else
@@ -899,6 +903,7 @@ int main(int argc, char *argv[]) {
            "10)\n");
     printf("  --cpu:           Optional flag to use CPU instead of GPU\n\n");
     printf("Supported formats: JPG, JPEG, PNG, BMP\n");
+
     return 1;
   }
 
@@ -945,7 +950,7 @@ int main(int argc, char *argv[]) {
   printf("Max threads per block: %d\n\n", prop.maxThreadsPerBlock);
 
   // Process all images in directory
-  // Allocate memory for hash results, use a reasonable estimate first
+  // Allocate memory for hash results, use a "reasonable" estimate first
   ImageHash *hashes = (ImageHash *)malloc(MAX_FILES * sizeof(ImageHash));
   if (!hashes) {
     printf("Memory allocation failed!\n");
@@ -964,6 +969,8 @@ int main(int argc, char *argv[]) {
 
   // Print results
   print_results(hashes, actual_image_count);
+
+  // Find similar images
   int res = find_similar_images(hashes, actual_image_count, threshold, use_gpu);
   if (res != 0) {
     printf("Error during hash comparison (code: %d) \n", res);
